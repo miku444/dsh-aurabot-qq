@@ -89,7 +89,7 @@ export function createQzoneSocial({ getConfig, onebot, hub, log, memory }) {
     const list = await onebot.call('get_qzone_msg_list', { num: 5 }, { timeoutMs: 20000 })
     for (const m of list?.msglist || []) {
       if (done >= budget) break
-      if (!(m.comment_num > 0) || Date.now() / 1000 - m.time > 3 * 86400) continue
+      if (!(m.comment_num > 0) || Date.now() / 1000 - m.time > 86400) continue
       const d = await onebot.call('get_qzone_msg_detail', { tid: m.tid, num: 30 }, { timeoutMs: 20000 })
       const handled = new Set(s.replied[m.tid] || [])
       for (const c of d?.comments || []) {

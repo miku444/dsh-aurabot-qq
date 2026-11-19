@@ -45,6 +45,17 @@ export const workspaceDirOf = (cfg) => String(cfg?.workspaceDir || '').trim() ||
 export const WORKSPACE_TITLE = 'Aurabot · QQ'
 const SOURCE_KIND = 'aurabot'
 
+const BILI_EYES_READ_TOOLS = [
+  'bili_look', 'bili_look_zoom', 'bili_find', 'bili_feed',
+  'bili_comments', 'bili_surf', 'bili_inbox',
+]
+const BILI_EYES_WRITE_TOOLS = [
+  'bili_like', 'bili_fav', 'bili_eyes_comment', 'bili_comment', 'bili_dm',
+  'bili_post', 'bili_follow', 'bili_confirm',
+]
+const BILI_EYES_ALL_TOOLS = [...BILI_EYES_READ_TOOLS, ...BILI_EYES_WRITE_TOOLS]
+
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const sessionKey = (id) => {
   const s = String(id ?? '')
@@ -93,7 +104,23 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
   const systemTurns = new Map() // chatId → 当前后台轮次，权限档位变化时也不能绕过它
   const systemStarting = new Set() // 建会话和恢复期间，同一个聊天只能有一个调用
   const systemFailures = new Map() // chatId → { count, until }
-  const SYSTEM_STUCK_GRACE_MS = 5 * 60_000
+  // 后台系统回合（宠物行为/碎碎念/写日记/空间互动……）只让模型吐一段文字或 JSON，
+// 但 profile 里全局插入的插件（ctx-slim / note-keeper / beauticode / dsh-tool-web）不认 preset，
+// 会把各自的工具定义塞进每一次请求——每轮固定多花约 3.4k tokens，而这些任务一次都没调用过。
+// 这里按会话类型挡掉：level==='chat' 的 system 会话一律不给这些工具。
+// 例外见 SYSTEM_TOOL_ALLOW：直播那类真要操作工作区/看依赖的后台任务，按会话名放行。
+const SYSTEM_GLOBAL_TOOLS = [
+  'beauticode_apply_image', 'beauticode_apply_video', 'beauticode_clear',
+  'beauticode_set_fish', 'beauticode_set_muted', 'beauticode_status',
+  'beauticode_theme_list', 'beauticode_theme_use',
+  'ctx_slim_config', 'ctx_slim_elide', 'ctx_slim_read', 'ctx_slim_search', 'ctx_slim_state',
+  'notes_heard', 'notes_persona_suggestions', 'notes_promote', 'notes_search', 'notes_today',
+]
+// 这些后台会话确实在用工作区工具（ext-livin 调过 working_directory / load_workspace_dependencies），
+// 按会话名前缀放行，别把它的能力砍掉。
+const SYSTEM_TOOL_ALLOW = ['ext-livin']
+
+const SYSTEM_STUCK_GRACE_MS = 5 * 60_000
   const SYSTEM_BACKOFF = [2, 5, 15, 30, 60, 120].map((minutes) => minutes * 60_000)
   const groupBuf = new Map() // groupId → [{t, uid, nick, text, at, replyId, quote}]
   const quoteCache = new Map() // chatId|replyId → { ok, who, uid, text, images, stickers, records, isBot }  引用消息解析缓存
@@ -505,7 +532,15 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
     assertActive()
     const sid = sessionKey(agent.session?.id ?? agent.id)
     const tools = level !== 'chat' && typeof buildTools === 'function' ? buildTools({ chat, level, sessionId: sid }) : []
-    const denied = (() => { try { return hooks?.deniedTools?.() || [] } catch (error) { return [] } })()
+    const denied = (() => {
+      const base = (() => { try { return hooks?.deniedTools?.() || [] } catch (error) { return [] } })()
+      const scoped = level === 'chat' ? BILI_EYES_ALL_TOOLS : level === 'social' ? BILI_EYES_WRITE_TOOLS : []
+      // 后台系统回合省 token：这些会话只输出一段文字/JSON，全局插件的工具定义每轮固定白花约 3.4k tokens。
+      // 只挡 system 会话，正常聊天（private/group）完全不受影响。
+      const trim = level === 'chat' && chat.kind === 'system' && !SYSTEM_TOOL_ALLOW.some((x) => chat.chatId.startsWith('system:' + x))
+        ? SYSTEM_GLOBAL_TOOLS : []
+      return [...new Set([...base, ...scoped, ...trim])]
+    })()
     // 模块（重）启动代际也进 key：热重载后工具名通常不变，但工具对象是旧实例的闭包（issue #73），
     // 只比名字会一直 return，会话里永远用旧实现/旧状态；带上代际就整套重挂。
     let gen = 0
@@ -518,7 +553,23 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
     const offs = []
     // 联动工具是给 DSH 其他会话用的，她自己的 QQ 会话里不该有（陌生人的会话更不行）
     if (denied.length) {
-      try { offs.push(agent.ctx.tools.restrict({ deny: denied })) } catch (error) { log.debug('屏蔽联动工具：', error.message) }
+      // 工具可能来自不同插件版本（比如 Bili-eyes 升级前后评论工具名变了）。
+      // restrict() 遇到不认识的名字会整次失败，导致所有写工具都没被挡住；逐个剔除未知名字后重试。
+      let pending = [...denied]
+      for (let i = 0; i < 12 && pending.length; i++) {
+        try {
+          offs.push(agent.ctx.tools.restrict({ deny: pending }))
+          pending = []
+          break
+        } catch (error) {
+          const unknown = /unknown global tool "([^"]+)"/.exec(String(error?.message || ''))
+          if (!unknown) {
+            log.debug('屏蔽联动工具：', error.message)
+            break
+          }
+          pending = pending.filter((name) => name !== unknown[1])
+        }
+      }
     }
     {
       for (const tool of tools) {
@@ -1085,6 +1136,8 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
       // 上一轮还在跑时新消息已经排队给「下一轮」：这一轮 turn/end 不能把下一轮的说话人清掉（#90）
       st.senders = st.pendingSenders || new Set()
       st.pendingSenders = new Set()
+      st.permSenders = st.pendingPermSenders || new Set()
+      st.pendingPermSenders = new Set()
       st.directRequester = st.pendingDirectRequester || null
       st.pendingDirectRequester = null
       st.directOwner = false
@@ -1504,7 +1557,9 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
         if (pending.has(msg.chatId)) await addGroupImages(msg, groupEntry)
         return
       }
-      groupEntry.direct = Boolean(msg.messageId && msg.messageId !== '0' && msg.userId && (msg.mentioned || quotedBot))
+      // direct：这一条是不是「在叫她」（@ 她 / 引用她 / 叫到名字 / 刚说完被追问）。
+      // 只有这种人能左右「主人才能用」的判断；插话、接着聊都没人指名找她，不算到谁头上（见 permSendersOf）。
+      groupEntry.direct = decision.mode === 'must'
       mode = decision.mode
       log.info(`群 ${msg.groupId}：${decision.reason} → 交给她`)
     }
@@ -1555,7 +1610,9 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
     if (msg.kind === 'private') lastPrivateAt.set(msg.userId, now)
     onActivity?.({ kind: 'in', chatId: msg.chatId, userId: msg.userId, nickname: msg.nickname, text, direct: msg.kind === 'private' || msg.mentioned || mode === 'must', owner: isOwner(cfg, msg.userId) })
 
-    enqueue({ chatId: msg.chatId, kind: msg.kind, userId: msg.userId, groupId: msg.groupId, nickname: msg.nickname }, content, msg.userId, wantsVoice(msg.text), mode, { stickerPick })
+    // direct：这条是不是「在叫她」（群里 @ 她 / 引用她 / 叫到名字，私聊都算）。权限判断只看这种人。
+    const direct = msg.kind !== 'group' || Boolean(groupEntry?.direct)
+    enqueue({ chatId: msg.chatId, kind: msg.kind, userId: msg.userId, groupId: msg.groupId, nickname: msg.nickname }, content, msg.userId, wantsVoice(msg.text), mode, { stickerPick, direct })
   }
 
   /** 把消息里的「[合并转发]」换成里面的聊天记录，里面的图片并进这条消息一起给她看。 */
@@ -1677,7 +1734,10 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
       const infos = await Promise.all(need.map((x) => quotedInfo(x.replyId, chat)))
       need.forEach((x, i) => { x.quote = infos[i] })
     }
-    const line = (x) => `${x.nick}(${x.uid})${x.at ? '@了你' : ''}：${x.text || '（图片/表情）'}${x.quote ? ' ' + quoteInline(x.quote) : ''}`
+    // 主人说话时直接标出来：不然她得自己拿 QQ 号去对，热闹的群里经常对不上（「认不出我」）
+    const ownerQQ = String(getConfig().ownerQQ || '')
+    const ownerMark = `【你的${getConfig().ownerName || '主人'}】`
+    const line = (x) => `${x.nick}(${x.uid})${ownerQQ && String(x.uid) === ownerQQ ? ownerMark : ''}${x.at ? '@了你' : ''}：${x.text || '（图片/表情）'}${x.quote ? ' ' + quoteInline(x.quote) : ''}`
     // 新消息带编号，她想专门回某一条时可以引用；编号 → QQ 消息 ID 记下来，发的时候换成引用
     const refs = {}
     const numbered = fresh.map((x, i) => {
@@ -1732,9 +1792,32 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
   const running = new Set() // chatId → 这一轮还在跑（模型 / 工具还没结束，turn/end 之前）；私聊此时新消息直接 steer 进去
   const isBusy = (chatId) => busy.has(chatId) && Date.now() - busy.get(chatId) < BUSY_MAX_MS
 
+  /**
+   * 这一批里「算在跟她说话的人」——只有他们能左右「主人才能用」的判断（群里别人顺嘴插的话不算）。
+   * 放宽窗口要尽量小，只处理这一个毛病：她忙着回上一段时，别人先说的话会和主人叫她那一条攒进同一批。
+   * 所以：只有「叫她的人全是主人」时才忽略之前的闲聊；叫她的里面有别人、或者压根没人叫她（她自己插话），
+   * 都退回全部说话人——和改之前一样严。叫她那一条之后还在说的人一律算（话题已经往前走了）。
+   */
+  const permSendersOf = (p) => {
+    const says = Array.isArray(p.speaks) ? p.speaks : []
+    const owner = String(getConfig().ownerQQ || '')
+    let last = -1
+    let onlyOwner = true
+    for (let i = 0; i < says.length; i++) {
+      if (!says[i].direct) continue
+      last = i
+      if (!owner || says[i].uid !== owner) onlyOwner = false
+    }
+    if (last < 0 || !onlyOwner) return [...(p.senders || [])]
+    const out = new Set()
+    for (let i = 0; i <= last; i++) if (says[i].direct) out.add(says[i].uid)
+    for (let i = last + 1; i < says.length; i++) out.add(says[i].uid)
+    return [...out]
+  }
+
   function enqueue(chat, content, senderId, wantVoice, mode = 'must', extra = {}) {
     const m = getConfig().merge
-    const p = pending.get(chat.chatId) || { chat, texts: [], images: [], senders: new Set(), wantVoice: false, timer: null, firstAt: Date.now(), mode, count: 0 }
+    const p = pending.get(chat.chatId) || { chat, texts: [], images: [], senders: new Set(), speaks: [], wantVoice: false, timer: null, firstAt: Date.now(), mode, count: 0 }
     p.chat = chat
     p.count++
     if ((RANK[mode] || 3) > (RANK[p.mode] || 3)) p.mode = mode
@@ -1744,6 +1827,13 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
     }
     if (extra.stickerPick) p.stickerPick = (p.stickerPick || 0) + extra.stickerPick
     if (senderId) p.senders.add(String(senderId))
+    // 按顺序记下这一批谁说了话、是不是在叫她（权限判断见 permSendersOf）：
+    // 她忙着回上一段时，群里别人顺嘴说的话也会攒进同一批，不能一锅端地拿去否掉主人的权限，
+    // 也不能反过来让群友搭主人那一条的顺风车——所以顺序要留着。
+    if (senderId) {
+      if (!Array.isArray(p.speaks)) p.speaks = []
+      p.speaks.push({ uid: String(senderId), direct: Boolean(extra.direct) })
+    }
     p.wantVoice = p.wantVoice || wantVoice
     pending.set(chat.chatId, p)
     clearTimeout(p.timer)
@@ -1772,7 +1862,7 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
       const query = p.texts.map((t) => t.replace(/^【私聊】[^：]*：/, '')).join('\n')
       const [first, ...rest] = [...p.senders]
       try {
-        await pushToSession(p.chat, content, first, { wantVoice: p.wantVoice, extraSenders: rest, queryText: query, steer: true })
+        await pushToSession(p.chat, content, first, { wantVoice: p.wantVoice, extraSenders: rest, permSenders: permSendersOf(p), queryText: query, steer: true })
       } catch (error) {
         bump('errors')
         log.error(`插话进 DSH 失败（${chatId}）：`, error.message)
@@ -1811,7 +1901,7 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
       const [first, ...rest] = [...p.senders]
       // 私聊：检索记忆时去掉「【私聊】某某(QQ)：」这个头
       const query = p.query ?? p.texts.map((t) => t.replace(/^【私聊】[^：]*：/, '')).join('\n')
-      await pushToSession(p.chat, content, first, { wantVoice: p.wantVoice, extraSenders: rest, queryText: query, speakers: p.speakers, autoReply: p.autoReply, directRequester: p.directRequester })
+      await pushToSession(p.chat, content, first, { wantVoice: p.wantVoice, extraSenders: rest, permSenders: permSendersOf(p), queryText: query, speakers: p.speakers, autoReply: p.autoReply, directRequester: p.directRequester })
     } catch (error) {
       release(chatId)
       bump('errors')
@@ -1978,8 +2068,18 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
         st.pendingSenders.add(String(u))
       }
     }
+    // 权限只认「直接跟她说话的人」：群里她回一段话时，同批里别人的插话不算在跟她说话（否则主人永远被否掉）。
+    const addPerm = (u) => {
+      if (!st.permSenders) st.permSenders = new Set()
+      st.permSenders.add(String(u))
+      if (queuedNextTurn) {
+        if (!st.pendingPermSenders) st.pendingPermSenders = new Set()
+        st.pendingPermSenders.add(String(u))
+      }
+    }
     if (senderId) addSender(senderId)
     for (const s of opts.extraSenders || []) addSender(s)
+    for (const u of (opts.permSenders && opts.permSenders.length ? opts.permSenders : [senderId])) if (u) addPerm(u)
     // 排队消息的直接请求者不能给正在执行的上一轮借权。
     if (!opts.steer) {
       if (queuedNextTurn) st.pendingDirectRequester = opts.directRequester || null
@@ -2128,12 +2228,19 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
     return result
   }
 
-  /** 这一轮里说话的人是不是全是主人（群管等敏感工具用）。 */
   /** 这一轮里主人说过话（群里常有别人插话，不要求每条都是主人）。 */
   // 主人私聊里只可能是主人说话：就算这一轮的记录丢了（工具是旧闭包、排队轮次被上一轮 turn/end 清掉等，见 #90），
   // 「仅主人」也应当放行；群聊 / 别人私聊不放宽。
   function ownerPrivateChat(sessionId) {
     try { return chatOfSession(sessionId) === `private:${getConfig().ownerQQ}` } catch (error) { return false }
+  }
+
+  /** 严格版：这一轮说话的人**全是**主人（群里别人说过话就不算）。给「操作这台电脑」这类最敏感的工具用。 */
+  function turnSendersAllOwnerStrict(sessionId) {
+    const st = turnState.get(sessionKey(sessionId))
+    if (st && st.directOwner) return true // 主人在 DSH 面板里直接打字
+    if (!st || !st.senders.size) return ownerPrivateChat(sessionId)
+    return [...st.senders].every((u) => isOwner(getConfig(), u))
   }
 
   function turnHasOwner(sessionId) {
@@ -2148,11 +2255,15 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
     return [...(turnState.get(sessionKey(sessionId))?.senders || [])]
   }
 
+  /** 这一轮是不是「主人在跟她说话」（群管、点歌、读文件等用）。口径见 permSendersOf。 */
   function turnSendersAllOwner(sessionId) {
     const st = turnState.get(sessionKey(sessionId))
     if (st && st.directOwner) return true // 主人在 DSH 面板里直接打字
-    if (!st || !st.senders.size) return ownerPrivateChat(sessionId)
-    return [...st.senders].every((u) => isOwner(getConfig(), u))
+    // 有「在跟她说话的人」就只按他们判断：群里她回一段话时，同批里别人顺嘴插的话不该把主人的权限一起否掉。
+    // 没有（这一轮纯属她自己插话）才退回全部说话人，保守判断。
+    const set = st && st.permSenders && st.permSenders.size ? st.permSenders : (st ? st.senders : null)
+    if (!set || !set.size) return ownerPrivateChat(sessionId)
+    return [...set].every((u) => isOwner(getConfig(), u))
   }
 
   /** 生图的群聊例外：主人是本轮唯一明确 @ / 引用回复的请求者。 */
@@ -2429,6 +2540,7 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
     runSubagentTurn,
     subagentFor,
     turnSendersAllOwner,
+    turnSendersAllOwnerStrict,
     turnDirectFromOwner,
     onNotice,
     turnHasOwner,
