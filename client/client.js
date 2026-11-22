@@ -2790,6 +2790,8 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       const load = (query) => get('/memories?q=' + encodeURIComponent(query ?? q)).then((r) => { setMem(r.items || []); setStats(r.stats || null) })
       const [styles, setStyles] = useState({})
       const [aff, setAff] = useState(null)
+      const [ember, setEmber] = useState(null)
+      const loadEmber = () => get('/speakup/ember').then((r) => setEmber(r.ember || null))
       const loadAff = () => get('/affinity/list').then((r) => setAff(r.list || null))
       const loadIns = () => get('/insights').then((r) => setStyles(r.styles || {}))
       const times = draft.memory.consolidateTimes || []
