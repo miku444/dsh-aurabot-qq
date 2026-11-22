@@ -429,13 +429,14 @@ export function createSpeakUp({ getConfig, hub, log, isMuted, memory }) {
     const h = new Date().getHours()
     const awake = h >= c.awakeFrom && h < c.awakeTo
     const idleOk = Date.now() - lastPrivateAt() > c.idleMinutes * 60_000
-    // 追问：她最后一句是在问主人、主人 15~40 分钟没回，有一半的机会轻轻追一句（每句最多追一次，不占每天的次数）
+    // 追问：她最后一句是问句、或话说到一半（结尾是逗号/省略号/连词），主人 15~45 分钟没回，轻轻追一句（每句最多追一次，不占每天的次数）
     const lb = hub.lastBotToOwner || { at: 0, text: '' }
     const quiet = Date.now() - lb.at
-    if (awake && c.nudge && lb.at > (hub.lastOwnerChatAt || 0) && lb.at !== s.nudgedFor && /[？?]|吗|呢|嘛|没$/.test(lb.text.trim()) && quiet > 15 * 60_000 && quiet < 40 * 60_000) {
+    const wasAsking = /[？?]|吗|呢|嘛|没$|\.\.\.|…|，|、|所以|然后|还有/.test(lb.text.trim())
+    if (awake && c.nudge && lb.at > (hub.lastOwnerChatAt || 0) && lb.at !== s.nudgedFor && wasAsking && quiet > 15 * 60_000 && quiet < 45 * 60_000) {
       s.nudgedFor = lb.at
       save(s)
-      if (Math.random() < 0.5) await fire('追问', { nudge: true })
+      if (Math.random() < 0.6) await fire('追问', { nudge: true })
       return
     }
     if (awake && idleOk && s.count < c.maxPerDay && Date.now() >= s.nextAt) {
@@ -449,5 +450,22 @@ export function createSpeakUp({ getConfig, hub, log, isMuted, memory }) {
     if (!(await tickFriends(cfg, s))) save(s)
   }
 
-  return { tick, fire, state: load }
+  return {
+    tick,
+    fire,
+    state: load,
+    /** 余温：上一句对主人说的话和多久前（面板显示用） */
+    ember() {
+      const lb = hub.lastBotToOwner || { at: 0, text: '' }
+      const s = load()
+      return {
+        lastText: String(lb.text || '').slice(-80),
+        lastAt: lb.at,
+        minutesAgo: lb.at ? Math.round((Date.now() - lb.at) / 60000) : null,
+        nudgedFor: s.nudgedFor || 0,
+        nextAt: s.nextAt || 0,
+        count: s.count || 0,
+      }
+    },
+  }
 }

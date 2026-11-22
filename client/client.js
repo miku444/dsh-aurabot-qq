@@ -2795,7 +2795,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       const times = draft.memory.consolidateTimes || []
       const setTime = (i, v) => { const t = times.slice(); t[i] = v; setDraft(setPath(draft, 'memory.consolidateTimes', t)) }
       const memOn = modOn(st, 'memory')
-      useEffect(() => { if (memOn) { load(''); loadIns() } ; loadAff() }, [memOn])
+      useEffect(() => { if (memOn) { load(''); loadIns() } ; loadAff(); loadEmber() }, [memOn])
       useEffect(() => { if (!memOn) return; const t = setTimeout(() => load(q), 250); return () => clearTimeout(t) }, [q])
       const last = st.memory && st.memory.lastConsolidate
       const moodCard = !modOn(st, 'mood') ? h(ModOff, { name: '心情' }) : h(Card, { title: '心情', right: f.sw('mood.enabled'), desc: '被夸、被哄、被凶都会影响ta的心情（对ta说的话、主人的话影响更大），过一阵子慢慢回到平常。心情好时ta话多、更爱发表情和语音、回得快、群里更爱插话；心情差时话少、回得慢、少发表情，还会带点小脾气。' },
@@ -2820,10 +2820,20 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
               h('span', { className: 'ab-muted ab-small' }, '  ' + x.band + ' · ' + x.score + '/100'),
               x.beMean > 0 ? h('span', { className: 'ab-small', style: { color: 'var(--ab-warn)' } }, ' 凶过' + x.beMean + '回') : null,
               x.inSpeak ? h('span', { className: 'ab-badge', style: { marginLeft: 6 } }, '常来往') : null)))))
-      if (!memOn) return h('div', { className: 'ab-grid' }, moodCard, affinityCard, h(ModOff, { name: '记忆' }))
+      const emberCard = h(Card, { title: '余温', desc: '上一句对你说的话还热着，过一会儿会顺着话头轻轻续一句（不是没头没尾地换话题）。' },
+        ember === null ? h('div', { className: 'ab-muted ab-small' }, '加载中…') : h('div', { className: 'ab-list', style: { marginTop: 6 } }, [
+          h('div', { className: 'ab-li' }, h('div', { className: 'body' }, [
+            h('span', { className: 'ab-muted ab-small' }, '她上一句说：'),
+            h('div', { style: { marginTop: 2, color: 'var(--ab-text)' } }, ember.lastText || '（还没有主动说过话）'),
+            h('div', { className: 'ab-muted ab-small', style: { marginTop: 4 } }, ember.minutesAgo === null ? '刚说完' : ember.minutesAgo + ' 分钟前'),
+            h('div', { className: 'ab-muted ab-small' }, ember.minutesAgo !== null && ember.minutesAgo >= 15 && ember.minutesAgo < 45 ? '在余温窗口里，快续了' : (ember.minutesAgo !== null && ember.minutesAgo >= 45 ? '凉了，不再追' : '')),
+          ])),
+        ]))
+      if (!memOn) return h('div', { className: 'ab-grid' }, moodCard, affinityCard, emberCard, h(ModOff, { name: '记忆' }))
       return h('div', { className: 'ab-grid' },
         moodCard,
         affinityCard,
+        emberCard,
         h(Card, { title: 'ta自己的说话方式', desc: '聊久了慢慢养成的说法。不会变成另一个人，只是越来越像「你们的」大肥鱼。对每个人和每个群的相处经验、说话习惯在「人物记忆」页。' },
           h(StyleEditor, { k: 'self', label: 'ta自己养成的说法', list: styles.self || [], toast, onSaved: loadIns })),
         h(Card, { title: '记忆库', right: f.sw('memory.enabled'), desc: '长期记忆：ta聊天时自己记的、每天从聊天里整理出来的、写过的空间日记、你手动加的。每一轮回复前，ta会按对方正在说的话翻出最相关的几条。' },

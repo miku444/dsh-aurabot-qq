@@ -18,6 +18,8 @@ export default {
       await speakUp.fire('手动')
       return { ok: true, message: '叫她去找你了' }
     })
+    // 余温：面板显示她上一句说的话和多久前
+    api.route('/speakup/ember', async () => ({ ok: true, ember: speakUp.ember ? speakUp.ember() : null }))
     return speakUp
   },
 }
