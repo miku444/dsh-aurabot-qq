@@ -859,14 +859,6 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
           h(Card, { title: 'ta现在', desc: '心情会随聊天起伏，过一阵子慢慢回到平常。' },
             h('div', { className: 'ab-flex', style: { marginBottom: 8 } }, h('b', null, st.mood.label), h('span', { className: 'ab-muted' }, st.mood.value + ' / 100')),
             h('div', { className: 'ab-mood' }, h('i', { style: { width: Math.max(4, st.mood.value) + '%' } })),
-            h('div', { style: { marginTop: 10, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px 14px' } },
-              [['happy', '开心'], ['calm', '平静'], ['sweet', '甜蜜'], ['proud', '得意'], ['worry', '担心'], ['sulky', '赌气'], ['jealous', '吃醋']].map(([k, lab]) => {
-                const v = (st.mood.dims && st.mood.dims[k]) || 0
-                return h('div', { key: k, style: { display: 'flex', alignItems: 'center', gap: 6 } },
-                  h('span', { className: 'ab-muted ab-small', style: { width: 34 } }, lab),
-                  h('div', { className: 'ab-mood', style: { flex: 1, height: 6 } }, h('i', { style: { width: Math.max(2, Math.min(100, v)) + '%', background: v >= 70 ? 'var(--ab-warn)' : 'var(--ab-sea)' } })),
-                  h('span', { className: 'ab-small', style: { width: 24, textAlign: 'right' } }, Math.round(v)))
-              })),
             h('div', { className: 'ab-kv', style: { marginTop: 14 } },
               h('span', null, '表情库'), h('span', null, st.stickers.count + ' 张'),
               h('span', null, '下一篇日记'), h('span', null, cfg.diary.enabled ? (st.diary.next || '今天写完了') : '没开'),
@@ -2803,7 +2795,15 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       const moodCard = !modOn(st, 'mood') ? h(ModOff, { name: '心情' }) : h(Card, { title: '心情', right: f.sw('mood.enabled'), desc: '被夸、被哄、被凶都会影响ta的心情（对ta说的话、主人的话影响更大），过一阵子慢慢回到平常。心情好时ta话多、更爱发表情和语音、回得快、群里更爱插话；心情差时话少、回得慢、少发表情，还会带点小脾气。' },
           h('div', { className: 'ab-flex', style: { marginBottom: 8 } }, h('b', null, st.mood.label), h('span', { className: 'ab-muted' }, st.mood.value + ' / 100'), st.mood.reason ? h('span', { className: 'ab-muted ab-small' }, '· 因为' + st.mood.reason) : null),
           h('div', { className: 'ab-mood' }, h('i', { style: { width: Math.max(4, st.mood.value) + '%' } })),
-          h('div', { style: { marginTop: 10 } },
+            h('div', { style: { marginTop: 10, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px 14px' } },
+              [['happy', '开心'], ['calm', '平静'], ['sweet', '甜蜜'], ['proud', '得意'], ['worry', '担心'], ['sulky', '赌气'], ['jealous', '吃醋']].map(([k, lab]) => {
+                const v = (st.mood.dims && st.mood.dims[k]) || 0
+                return h('div', { key: k, style: { display: 'flex', alignItems: 'center', gap: 6 } },
+                  h('span', { className: 'ab-muted ab-small', style: { width: 34 } }, lab),
+                  h('div', { className: 'ab-mood', style: { flex: 1, height: 6 } }, h('i', { style: { width: Math.max(2, Math.min(100, v)) + '%', background: v >= 70 ? 'var(--ab-warn)' : 'var(--ab-sea)' } })),
+                  h('span', { className: 'ab-small', style: { width: 24, textAlign: 'right' } }, Math.round(v)))
+              })),
+            h('div', { style: { marginTop: 10 } },
             h(Row, { label: '多久回到平常', hint: '半衰期' }, f.range('mood.halfLifeHours', 0.5, 24, 0.5, (v) => v + ' 小时')),
             h(Row, { label: '平常是多少', hint: '基线：没人说话时心情会慢慢往这个值靠（默认 60）' }, f.range('mood.base', 10, 90, 1, (v) => v + ' / 100')),
             h(Row, { label: '聊天流水留多久', hint: '默认留 7 天，刚说过的话靠它想起来；0 = 整理完就删；-1 = 永久保留；其他数字 = 留这么多天。留得越久，本机存的聊天原文越多' }, f.num('memory.keepChatlogDays', { min: -1, max: 3650 })),
