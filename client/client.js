@@ -2795,7 +2795,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       const times = draft.memory.consolidateTimes || []
       const setTime = (i, v) => { const t = times.slice(); t[i] = v; setDraft(setPath(draft, 'memory.consolidateTimes', t)) }
       const memOn = modOn(st, 'memory')
-      useEffect(() => { if (memOn) { load(''); loadIns() } }, [memOn])
+      useEffect(() => { if (memOn) { load(''); loadIns() } ; loadAff() }, [memOn])
       useEffect(() => { if (!memOn) return; const t = setTimeout(() => load(q), 250); return () => clearTimeout(t) }, [q])
       const last = st.memory && st.memory.lastConsolidate
       const moodCard = !modOn(st, 'mood') ? h(ModOff, { name: '心情' }) : h(Card, { title: '心情', right: f.sw('mood.enabled'), desc: '被夸、被哄、被凶都会影响ta的心情（对ta说的话、主人的话影响更大），过一阵子慢慢回到平常。心情好时ta话多、更爱发表情和语音、回得快、群里更爱插话；心情差时话少、回得慢、少发表情，还会带点小脾气。' },
