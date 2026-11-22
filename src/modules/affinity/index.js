@@ -74,6 +74,23 @@ export default {
       return tools
     })
 
+    // 面板数据：亲疏列表（按分数倒序），面板页用
+    api.route('/affinity/list', async () => {
+      const s = affinity.load()
+      const cfg = api.config()
+      const spk = (cfg.speakUp?.allow || []).map(String)
+      const priv = (cfg.allow?.private || []).map(String)
+      const list = Object.entries(s.people || {})
+        .map(([qq, p]) => ({
+          qq, score: Math.round(p.score || 0), meets: p.meets || 0, beMean: p.beMean || 0, lastAt: p.lastAt || 0,
+          band: bandOf(p.score || 0).label,
+          inSpeak: spk.includes(String(qq)), inWhitelist: priv.includes(String(qq)),
+        }))
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 60)
+      return { ok: true, list }
+    })
+
     return affinity
   },
 }

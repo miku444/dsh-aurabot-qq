@@ -859,6 +859,14 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
           h(Card, { title: 'ta现在', desc: '心情会随聊天起伏，过一阵子慢慢回到平常。' },
             h('div', { className: 'ab-flex', style: { marginBottom: 8 } }, h('b', null, st.mood.label), h('span', { className: 'ab-muted' }, st.mood.value + ' / 100')),
             h('div', { className: 'ab-mood' }, h('i', { style: { width: Math.max(4, st.mood.value) + '%' } })),
+            h('div', { style: { marginTop: 10, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px 14px' } },
+              [['happy', '开心'], ['calm', '平静'], ['sweet', '甜蜜'], ['proud', '得意'], ['worry', '担心'], ['sulky', '赌气'], ['jealous', '吃醋']].map(([k, lab]) => {
+                const v = (st.mood.dims && st.mood.dims[k]) || 0
+                return h('div', { key: k, style: { display: 'flex', alignItems: 'center', gap: 6 } },
+                  h('span', { className: 'ab-muted ab-small', style: { width: 34 } }, lab),
+                  h('div', { className: 'ab-mood', style: { flex: 1, height: 6 } }, h('i', { style: { width: Math.max(2, Math.min(100, v)) + '%', background: v >= 70 ? 'var(--ab-warn)' : 'var(--ab-sea)' } })),
+                  h('span', { className: 'ab-small', style: { width: 24, textAlign: 'right' } }, Math.round(v)))
+              })),
             h('div', { className: 'ab-kv', style: { marginTop: 14 } },
               h('span', null, '表情库'), h('span', null, st.stickers.count + ' 张'),
               h('span', null, '下一篇日记'), h('span', null, cfg.diary.enabled ? (st.diary.next || '今天写完了') : '没开'),
@@ -2781,6 +2789,8 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       const [adding, setAdding] = useState({ text: '', aboutName: '', importance: 0.6 })
       const load = (query) => get('/memories?q=' + encodeURIComponent(query ?? q)).then((r) => { setMem(r.items || []); setStats(r.stats || null) })
       const [styles, setStyles] = useState({})
+      const [aff, setAff] = useState(null)
+      const loadAff = () => get('/affinity/list').then((r) => setAff(r.list || null))
       const loadIns = () => get('/insights').then((r) => setStyles(r.styles || {}))
       const times = draft.memory.consolidateTimes || []
       const setTime = (i, v) => { const t = times.slice(); t[i] = v; setDraft(setPath(draft, 'memory.consolidateTimes', t)) }
@@ -2801,9 +2811,19 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
             h('div', { className: 'meta' }, timeAgo(x.at)),
             h('div', { className: 'body' }, (x.to >= x.from ? '↑ ' : '↓ ') + x.from + ' → ' + x.to, h('span', { className: 'ab-muted ab-small' }, '  ' + x.reason))))) : null,
         )
-      if (!memOn) return h('div', { className: 'ab-grid' }, moodCard, h(ModOff, { name: '记忆' }))
+      const affinityCard = h(Card, { title: '亲疏', desc: '她心里对每个人的亲近程度：直接说话、被温柔对待会变亲近，被凶会记住。' },
+        aff === null ? h('div', { className: 'ab-muted ab-small' }, '加载中…') :
+        h('div', { className: 'ab-list' },
+          (aff && aff.length ? aff : [{ qq: '—', score: 0, band: '还没有记录', beMean: 0, inSpeak: false }]).slice(0, 12).map((x, i) =>
+            h('div', { key: i, className: 'ab-li', style: { padding: '4px 0' } }, h('div', { className: 'body' },
+              h('span', null, x.qq === '—' ? '还没有亲疏记录' : x.qq),
+              h('span', { className: 'ab-muted ab-small' }, '  ' + x.band + ' · ' + x.score + '/100'),
+              x.beMean > 0 ? h('span', { className: 'ab-small', style: { color: 'var(--ab-warn)' } }, ' 凶过' + x.beMean + '回') : null,
+              x.inSpeak ? h('span', { className: 'ab-badge', style: { marginLeft: 6 } }, '常来往') : null)))))
+      if (!memOn) return h('div', { className: 'ab-grid' }, moodCard, affinityCard, h(ModOff, { name: '记忆' }))
       return h('div', { className: 'ab-grid' },
         moodCard,
+        affinityCard,
         h(Card, { title: 'ta自己的说话方式', desc: '聊久了慢慢养成的说法。不会变成另一个人，只是越来越像「你们的」大肥鱼。对每个人和每个群的相处经验、说话习惯在「人物记忆」页。' },
           h(StyleEditor, { k: 'self', label: 'ta自己养成的说法', list: styles.self || [], toast, onSaved: loadIns })),
         h(Card, { title: '记忆库', right: f.sw('memory.enabled'), desc: '长期记忆：ta聊天时自己记的、每天从聊天里整理出来的、写过的空间日记、你手动加的。每一轮回复前，ta会按对方正在说的话翻出最相关的几条。' },
