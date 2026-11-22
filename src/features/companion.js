@@ -248,7 +248,7 @@ export function createMood({ getConfig, dsh, log }) {
     if (reason) {
       const s = load()
       s.reason = cleanText(reason)
-      s.history = [{ at: Date.now(), from: before, to: after, reason: cleanText(reason) }, ...(s.history || [])].slice(0, 200)
+      // 七维变化不进宏观 history（from/to 是数字语义），避免面板拼出 [object Object]
       save(s)
     }
     try { log?.debug?.(`七维变化：${entries.map(([k, v]) => `${k}${v > 0 ? '+' : ''}${v}`).join(' ')}（${reason || ''}）`) } catch (error) {}
@@ -276,6 +276,9 @@ export function createMood({ getConfig, dsh, log }) {
       if (!d0) return
       const d = Math.round(d0 * (direct ? 1 : 0.3) * (owner ? 1.5 : 1))
       nudge(d, `${who || '有人'}说「${clipText(text, 20)}」`)
+      // 关键词也推七维：开心/被夸提 happy，被凶/被冷落提 sulky（轻一点，模型判断关着也有起伏）
+      if (d > 0) nudges({ happy: Math.min(25, Math.round(d * 1.6)) }, '')
+      else nudges({ sulky: Math.min(25, Math.round(-d * 1.6)) }, '')
     },
     /**
      * 模型判心情（可选）：一轮聊完，看「对方说的 + 她回的」判断心情往哪走。没把握的（confidence < 0.6）不算。
