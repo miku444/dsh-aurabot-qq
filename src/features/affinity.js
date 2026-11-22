@@ -68,9 +68,21 @@ export function createAffinity({ getConfig, dataDir, log }) {
     const s = load()
     const key = String(uid)
     const now = Date.now()
-    // 主人的初始亲疏高：她天然和主人最亲，不用从陌生攒起
     const isOwner = owner
-    const p = s.people[key] || { score: isOwner ? 72 : 45, lastAt: 0, meets: 0, beMean: 0 }
+    // 初始分：主人最高；老朋友按「主动搭话名单 > 私聊白名单 > 陌生人」递减，不用从 45 生分起步
+    if (!s.people[key]) {
+      let start = 45
+      if (isOwner) start = 72
+      else {
+        const cfg = getConfig()
+        const spk = (cfg.speakUp?.allow || []).map(String)
+        const priv = (cfg.allow?.private || []).map(String)
+        if (spk.includes(key)) start = 68 // 常来往、会主动找她聊
+        else if (priv.includes(key)) start = 58 // 以前就加过的好友
+      }
+      s.people[key] = { score: start, lastAt: 0, meets: 0, beMean: 0 }
+    }
+    const p = s.people[key]
     // 上限增速，越亲近越难涨（跟七维同一套思路）
     const cur = clamp(p.score)
     let d = 0
