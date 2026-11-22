@@ -16,6 +16,30 @@ export default {
   setup(api) {
     const affinity = createAffinity({ getConfig: api.config, dataDir: api.dataDir, log: api.log })
 
+    // 启动播种：把白名单和主动搭话名单里的人都登记进亲疏表（初始分给名单分，不覆盖已有记录）
+    ;(function seed() {
+      try {
+        const cfg = api.config()
+        const s = affinity.load()
+        const spk = (cfg.speakUp?.allow || []).map(String)
+        const priv = (cfg.allow?.private || []).map(String)
+        const all = new Set([...spk, ...priv])
+        let touched = false
+        for (const qq of all) {
+          if (!s.people[qq]) {
+            s.people[qq] = { score: spk.includes(qq) ? 68 : 58, lastAt: 0, meets: 0, beMean: 0 }
+            touched = true
+          }
+        }
+        // 主人也登记上，开局 72
+        if (cfg.ownerQQ && !s.people[String(cfg.ownerQQ)]) {
+          s.people[String(cfg.ownerQQ)] = { score: 72, lastAt: 0, meets: 0, beMean: 0 }
+          touched = true
+        }
+        if (touched) affinity.save(s)
+      } catch (e) { try { api.log?.warn?.('亲疏播种失败：', e.message) } catch (x) {} }
+    })()
+
     // 有人对她说了一轮：喂给亲疏记一笔。群里不是直接对她说的只算小额。
     api.on('activity', (a) => {
       if (a.kind !== 'in' || !a.text || !a.userId) return
