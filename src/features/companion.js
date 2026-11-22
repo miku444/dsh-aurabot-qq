@@ -4,6 +4,7 @@ import { dataDir, readJson, writeJson } from '../core/store.js'
 import { askModel } from '../core/llm.js'
 import { cleanText, clipText } from '../core/text.js'
 import { shouldDeferBackground } from '../core/offpeak.js'
+import { DIM_ORDER, MACRO_MOOD_LEXICON, SINGLE_DIM_LEXICON, PAIR_DIM_LEXICON, TRIPLE_DIM_LEXICON } from './mood-lexicon.js'
 
 // ---------------- 心情 ----------------
 // 0~100，基线 60。聊天里的话按关键词推一推，随时间按半衰期回到基线。
@@ -57,18 +58,97 @@ export function decayed(value, at, halfLifeHours, now = Date.now(), base = MOOD_
 
 /** 解析模型判心情的结果：{delta, reason, confidence}；解析不了返回 null。 */
 export function parseMoodJudge(out) {
-  const m = String(out || '').match(/\{[\s\S]*\}/)
+  const m = String(out || "").match(/\{[\s\S]*\}/)
   if (!m) return null
   try {
     const j = JSON.parse(m[0])
-    const delta = Math.max(-15, Math.min(15, Math.round(Number(j.delta) || 0)))
+    const delta = Math.max(-15, Math.min(15, Math.round(Number(j.macro ?? j.delta) || 0)))
     const confidence = Math.max(0, Math.min(1, Number(j.confidence) || 0))
-    return { delta, reason: String(j.reason || '').slice(0, 40), confidence }
+    const dims = {}
+    if (j.dims && typeof j.dims === "object") {
+      for (const [k, v] of Object.entries(j.dims)) {
+        const n = Math.round(Number(v) || 0)
+        if (n) dims[k] = Math.max(-40, Math.min(40, n))
+      }
+    }
+    return { delta, dims, reason: String(j.reason || "").slice(0, 40), confidence }
   } catch (error) {
     return null
   }
 }
 
+// ---------------- 七维情绪 ----------------
+// 参考星见弥 M2 的做法：七维分值 + 437 条静态词库，情绪不再是「一个数」。
+// 四把锁防止情绪挂在天花板：边际递减、对立压制、两段退潮、单次限流。
+
+const DIM_WARM = new Set(['happy', 'calm', 'sweet', 'proud'])
+const DIM_COOL = new Set(['worry', 'sulky', 'jealous'])
+
+function emptyDims() {
+  const o = {}
+  for (const k of DIM_ORDER) o[k] = 0
+  return o
+}
+
+/** 锁 1：越接近满格越难涨（S 型边际递减）。 */
+function resistance(v) {
+  if (v < 30) return 1
+  if (v < 55) return 0.7
+  if (v < 70) return 0.45
+  if (v < 90) return 0.33
+  return 0.22
+}
+
+/** 锁 3：两段退潮。强档退得快（22 分钟半衰），轻中度留得久（55 分钟）。 */
+function decayDim(v, at, now) {
+  if (!v) return 0
+  const min = Math.max(0, (now - at) / 60_000)
+  const half = v >= 70 ? 22 : 55
+  return v * Math.pow(0.5, min / half)
+}
+
+function tierOf(v) {
+  if (v < 30) return 0
+  if (v < 55) return 1
+  if (v < 70) return 2
+  if (v < 90) return 3
+  return 4
+}
+
+function bandOf(v) {
+  if (v < 55) return 'L'
+  if (v < 70) return 'M'
+  return 'H'
+}
+
+function bucketOf(mood) {
+  const m = Math.max(0, Math.min(100, Number(mood) || 0))
+  return Math.min(9, Math.floor(m / 10))
+}
+
+/** 0 维查宏观、1 维查单维、2 维查两维、3 维以上取 Top-3。查不到返回空串。 */
+export function lookupMoodWord(mood, dims) {
+  const active = DIM_ORDER.filter((k) => Number(dims?.[k] || 0) >= 30).map((k) => [k, Number(dims[k])])
+  active.sort((a, b) => b[1] - a[1] || DIM_ORDER.indexOf(a[0]) - DIM_ORDER.indexOf(b[0]))
+  const n = active.length
+  if (n === 0) return MACRO_MOOD_LEXICON[bucketOf(mood)] || ''
+  if (n === 1) return SINGLE_DIM_LEXICON[`${active[0][0]}|${tierOf(active[0][1])}`] || ''
+  if (n === 2) {
+    const [a, b] = active
+    const pair = DIM_ORDER.indexOf(a[0]) <= DIM_ORDER.indexOf(b[0]) ? [a, b] : [b, a]
+    return PAIR_DIM_LEXICON[`${pair[0][0]}|${pair[1][0]}|${bandOf(pair[0][1])}|${bandOf(pair[1][1])}`] || ''
+  }
+  const top = active.slice(0, 3)
+  const primary = top[0][0]
+  const intensity = top[0][1] >= 70 ? 'H' : 'M'
+  const sorted = [...top].sort((x, y) => DIM_ORDER.indexOf(x[0]) - DIM_ORDER.indexOf(y[0]))
+  return TRIPLE_DIM_LEXICON[`${sorted[0][0]}|${sorted[1][0]}|${sorted[2][0]}|${primary}|${intensity}`] || ''
+}
+
+/**
+ * 心情：宏观一个数（0~100，基线 60）+ 七维分值（0~100）。
+ * 宏观管行为（表情/语音频率、回复快慢），七维管「怎么说话」。对外 API 和原来一致。
+ */
 export function createMood({ getConfig, dsh, log }) {
   let judgeDeferLogged = false
   const file = () => dataDir('mood.json')
@@ -77,13 +157,32 @@ export function createMood({ getConfig, dsh, log }) {
     const v = Number(getConfig().mood?.base)
     return Number.isFinite(v) ? Math.min(90, Math.max(10, v)) : MOOD_BASE // 面板是 10~90，手写超出时夹到边上，别退回默认
   }
-  const load = () => readJson(file(), () => ({ value: base(), at: Date.now(), reason: '', history: [] }))
+
+  const load = () => {
+    const s = readJson(file(), () => ({ value: base(), at: Date.now(), reason: '', history: [] }))
+    if (!s.dims || typeof s.dims !== 'object') s.dims = emptyDims()
+    for (const k of DIM_ORDER) if (!Number.isFinite(Number(s.dims[k]))) s.dims[k] = 0
+    if (!Number.isFinite(Number(s.dimsAt))) s.dimsAt = Number(s.at) || Date.now()
+    return s
+  }
   const save = (s) => writeJson(file(), s)
+
+  /** 宏观：按半衰期衰减回基线。 */
   const current = () => {
     const s = load()
     return Math.round(decayed(s.value, s.at, getConfig().mood.halfLifeHours, Date.now(), base()))
   }
-  /** 推一下心情（d 可正可负），记下原因。 */
+
+  /** 七维：各自按两段半衰期衰减，取整。 */
+  const dims = () => {
+    const s = load()
+    const now = Date.now()
+    const o = {}
+    for (const k of DIM_ORDER) o[k] = Math.max(0, Math.round(decayDim(Number(s.dims[k]) || 0, s.dimsAt, now)))
+    return o
+  }
+
+  /** 推一下宏观心情（d 可正可负），记下原因。原来的接口，保持不变。 */
   function nudge(d, reason) {
     if (!getConfig().mood.enabled || !d) return
     const s = load()
@@ -92,17 +191,79 @@ export function createMood({ getConfig, dsh, log }) {
     s.at = Date.now()
     reason = cleanText(reason)
     s.reason = reason
-    // 保留 200 条：20 条只够两小时，出问题查不到原因（实测需要回溯半天以上）
     s.history = [{ at: Date.now(), from: before, to: Math.round(s.value), reason }, ...(s.history || [])].slice(0, 200)
     save(s)
+    // 宏观动了，七维也顺手带一下：高兴提 happy，难受提 sulky，两边别各说各话
+    if (d > 0) nudgeDim('happy', Math.min(40, Math.round(d * 0.8)), '')
+    else nudgeDim('sulky', Math.min(40, Math.round(-d * 0.8)), '')
     try { log?.debug?.(`心情 ${before} → ${Math.round(s.value)}（${d > 0 ? '+' : ''}${d}）：${reason}`) } catch (error) {}
   }
+
+  /**
+   * 推一下某一维。positive 时吃「边际递减」的折扣，负向不打折（难受要实打实）。
+   * 返回实际变动量。
+   */
+  function nudgeDim(key, d, reason) {
+    if (!getConfig().mood.enabled || !DIM_ORDER.includes(key) || !d) return 0
+    const s = load()
+    const now = Date.now()
+    const cur = decayDim(Number(s.dims[key]) || 0, s.dimsAt, now)
+    const raw = Number(d) || 0
+    const eff = raw > 0 ? raw * resistance(cur) : raw
+    const next = Math.max(0, Math.min(100, cur + eff))
+    s.dims = { ...s.dims, [key]: next }
+    s.dimsAt = now
+    if (reason) s.reason = cleanText(reason)
+    save(s)
+    return Math.round(next - cur)
+  }
+
+  /**
+   * 一次收多个维度的变化（模型给的 dims）。锁 4：单次最多动 3 维，超出按幅度取前 3。
+   * 锁 2：暖色涨了就把冷色按 0.3 回压，但允许「嘴硬但心里甜」——冷色最多留到主色的 0.7 倍。
+   */
+  function nudges(patch, reason) {
+    if (!getConfig().mood.enabled || !patch) return
+    const entries = Object.entries(patch)
+      .filter(([k, v]) => DIM_ORDER.includes(k) && Math.abs(Number(v) || 0) >= 1)
+      .sort((a, b) => Math.abs(Number(b[1])) - Math.abs(Number(a[1])))
+      .slice(0, 3)
+    if (!entries.length) return
+    const before = dims()
+    for (const [k, v] of entries) nudgeDim(k, v, '')
+    // 对立压制：暖色和冷色同时对向增长时，压一压对立侧，但留 0.7 的余地
+    const after = dims()
+    const warmTop = [...DIM_WARM].reduce((a, k) => Math.max(a, after[k]), 0)
+    const coolTop = [...DIM_COOL].reduce((a, k) => Math.max(a, after[k]), 0)
+    if (warmTop >= 30 && coolTop >= 30) {
+      const cap = Math.round(warmTop * 0.7)
+      if (coolTop > cap) {
+        const s = load()
+        for (const k of DIM_COOL) {
+          if ((Number(s.dims[k]) || 0) > cap) s.dims[k] = cap
+        }
+        save(s)
+      }
+    }
+    if (reason) {
+      const s = load()
+      s.reason = cleanText(reason)
+      s.history = [{ at: Date.now(), from: before, to: after, reason: cleanText(reason) }, ...(s.history || [])].slice(0, 200)
+      save(s)
+    }
+    try { log?.debug?.(`七维变化：${entries.map(([k, v]) => `${k}${v > 0 ? '+' : ''}${v}`).join(' ')}（${reason || ''}）`) } catch (error) {}
+  }
+
   return {
     current,
+    dims,
     label: () => moodLabel(current()),
-    state: () => ({ ...load(), value: current(), label: moodLabel(current()) }),
+    word: () => lookupMoodWord(current(), dims()),
+    state: () => ({ ...load(), value: current(), label: moodLabel(current()), dims: dims() }),
     effects: () => (getConfig().mood.enabled ? moodEffects(current()) : moodEffects(base())),
     nudge,
+    nudgeDim,
+    nudges,
     /**
      * 聊天里的一句话。direct = 是对她说的（私聊、@她、叫她）；owner = 主人说的。
      * 不是对她说的群聊只算三成，主人的话算 1.5 倍。
@@ -119,6 +280,7 @@ export function createMood({ getConfig, dsh, log }) {
     /**
      * 模型判心情（可选）：一轮聊完，看「对方说的 + 她回的」判断心情往哪走。没把握的（confidence < 0.6）不算。
      * origin：user = 有人在跟她说话；speak-up = 她自己主动找人（判她自己的心意，不是被叫来干活）。
+     * 输出宏观 delta（管行为）和七维 changes（管语气）。
      */
     async judge({ userText, reply, who = '对方', origin = 'user' }) {
       const cfg = getConfig().mood
@@ -130,32 +292,48 @@ export function createMood({ getConfig, dsh, log }) {
       }
       judgeDeferLogged = false
       const v = current()
+      const d0 = dims()
       const scene = origin === 'speak-up' ? `这一轮是她自己想${who}了、主动去找${who}说话（不是被叫来干活）` : `这一轮是${who}在跟她说话`
       try {
         const out = await askModel(dsh, {
           cfg: getConfig(),
-          system: '你在判断聊天角色「大肥鱼」聊完一轮后的心情变化。她现在心情 ' + v + '/100（' + base() + ' 是平常）。' + scene + '。只看这一轮真正影响她心情的东西：被夸、被关心、被惦记会开心；被凶、被冷落、被嫌弃会难过；开玩笑的「讨厌~」「笨蛋」不算真骂。只输出 JSON：{"delta": -15~15 的整数, "reason": "十几个字的理由", "confidence": 0~1 你有多确定}。没什么影响就 delta 为 0。',
+          system:
+            '你在判断聊天角色「小抚子」聊完一轮后的心情变化。她性格软乎乎的、有点黏人、喜欢贴贴，被夸会高兴，被冷落会有点委屈。' +
+            `现在宏观心情 ${v}/100（${base()} 是平常）；七维分值：${DIM_ORDER.map((k) => `${k}=${d0[k]}`).join('，')}。` +
+            scene + '。只看这一轮真正影响她心情的东西：被夸、被关心、被惦记会开心；被凶、被冷落、被嫌弃会难过；开玩笑的「讨厌~」「笨蛋」不算真骂。' +
+            '七维含义：happy 开心、calm 踏实安心、sweet 甜蜜害羞、proud 得意、worry 担心、sulky 赌气委屈、jealous 吃醋。' +
+            '只输出 JSON：{"macro": -15~15 的整数, "dims": {"维度名": -40~40 的整数, 最多 3 个}, "reason": "十几个字的理由", "confidence": 0~1 你有多确定}。' +
+            '没什么影响就都填 0。calm 只在被安抚下来或安静陪伴时才加，别在普通闲聊里顺手加。',
           text: `${origin === 'speak-up' ? '她主动说' : who + '说'}：${String(userText || '').slice(0, 600)}\n她回：${String(reply || '').slice(0, 600)}`,
           maxTokens: 400,
           temperature: 0.2,
         })
         const r = parseMoodJudge(out)
         if (!r) return null
-        if (r.confidence >= 0.6 && Math.abs(r.delta) >= 2) nudge(r.delta, r.reason || '刚才那一下')
+        if (r.confidence >= 0.6) {
+          if (Math.abs(r.delta) >= 2) nudge(r.delta, r.reason || '刚才那一下')
+          if (r.dims && Object.keys(r.dims).length) nudges(r.dims, r.reason || '刚才那一下')
+        }
         return r
       } catch (error) {
         return null
       }
     },
-    /** 给每一轮的上下文：心情明显偏离平常时，告诉她现在的状态和该怎么说话。 */
+    /** 给每一轮的上下文：有明显情绪时才说，而且说的是具体的「怎么个高兴法」。平平常常就不说。 */
     contextLine() {
       if (!getConfig().mood.enabled) return ''
       const s = load()
       const v = current()
+      const dv = dims()
       const label = moodLabel(v)
       const style = MOOD_STYLE[label]
-      if (!style) return ''
-      return `（你现在${label}${s.reason ? '，因为' + cleanText(s.reason) : ''}。这会自然地影响你说话：${style}。不用说出来自己心情如何。）`
+      const word = lookupMoodWord(v, dv)
+      const anyDim = DIM_ORDER.some((k) => dv[k] >= 30)
+      // 平平常常、又没有哪一维被点起来：不注入，免得把性格念定住
+      if (!word || (!anyDim && label === '平平常常')) return ''
+      const tail = s.reason ? `，因为${cleanText(s.reason)}` : ''
+      const stylePart = style ? `这会自然地影响你说话：${style}。` : ''
+      return `（你现在${word}${tail}。${stylePart}不用说出来自己心情如何。）`
     },
   }
 }
@@ -191,10 +369,10 @@ export function createSpeakUp({ getConfig, hub, log, isMuted, memory }) {
     const cfg = getConfig()
     const owner = cfg.ownerName || '主人'
     const idle = Math.round((Date.now() - lastPrivateAt()) / 60000)
-    const angle = ANGLES[Math.floor(Math.random() * ANGLES.length)]
+    const angle = Math.random() < 0.6 ? ANGLES[1] : ANGLES[Math.floor(Math.random() * ANGLES.length)]
     const prompt = nudge
       ? `【系统提醒，不是${owner}说的话】你刚才跟${owner}说「${String(hub.lastBotToOwner?.text || '').slice(-60)}」，${owner}已经 ${idle} 分钟没回了。可以轻轻追一句（比如「人呢」「睡着啦？」，或者换个话题），别催、别抱怨；觉得${owner}在忙就只回 [沉默]。`
-      : `【系统提醒，不是${owner}说的话】你已经 ${idle > 600 ? '很久' : idle + ' 分钟'}没和${owner}私聊了，想主动找${owner}说点什么。这次的由头可以是：${angle}。优先用手里真实的素材（最近做过的事、记忆里的、聊天流水里能查到的），没有真实素材就别硬找，也不要编；用你自己的口气，一两句就好，别用模板、别解释为什么来找；实在不想说就只回 [沉默]。`
+      : `【系统提醒，不是${owner}说的话】你已经 ${idle > 600 ? '很久' : idle + ' 分钟'}没和${owner}私聊了，想主动找${owner}说点什么。先翻翻小本本（note_recent / note_search），再看你们最近在聊什么，有答应了没做的、话没说完的，就顺着那件事往下说，别每回都换新话题；实在接不上，再从这些里挑一个：${angle}。优先用手里真实的素材（最近做过的事、记忆里的、聊天流水里能查到的），没有真实素材就别硬找，也不要编；用你自己的口气，一两句就好，别用模板、别解释为什么来找；实在不想说就只回 [沉默]。`
     log.info(`主动搭话（${reason}）`)
     await hub.pushToSession({ chatId: `private:${cfg.ownerQQ}`, kind: 'private', userId: cfg.ownerQQ, nickname: owner }, [{ type: 'text', text: prompt }], '')
   }
@@ -202,8 +380,8 @@ export function createSpeakUp({ getConfig, hub, log, isMuted, memory }) {
   /** 找白名单里的人：不提主人的事，这是她和对方自己的聊天。 */
   async function fireFriend(qq) {
     const idle = Math.round((Date.now() - (hub.lastPrivateAt?.(qq) || 0)) / 60000)
-    const angle = ANGLES[Math.floor(Math.random() * ANGLES.length)]
-    const prompt = `【系统提醒，不是对方说的话】你已经 ${idle > 600 ? '很久' : idle + ' 分钟'}没和这位朋友私聊了，想主动找对方说点什么。这次的由头：${angle}。只说你和对方之间的事，别提主人或别人的私事。`
+    const angle = Math.random() < 0.6 ? ANGLES[1] : ANGLES[Math.floor(Math.random() * ANGLES.length)]
+    const prompt = `【系统提醒，不是对方说的话】你已经 ${idle > 600 ? '很久' : idle + ' 分钟'}没和这位朋友私聊了，想主动找对方说点什么。先翻翻小本本里和这位朋友的记录，有话没说完就顺着那件事往下说，接不上再从这些里挑一个：${angle}。只说你和对方之间的事，别提主人或别人的私事。`
     log.info(`主动搭话（白名单 ${qq}）`)
     await hub.pushToSession({ chatId: `private:${qq}`, kind: 'private', userId: qq, nickname: qq }, [{ type: 'text', text: prompt }], '')
   }
